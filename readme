@@ -1,3 +1,7 @@
+Uses deep learning for the multi-label classification task on Reuters data
+NN architecture:
+BERT transformer (pretrained-model) + sigmoid layer (fine-tuning layer)
+
 
 Run script
 ```

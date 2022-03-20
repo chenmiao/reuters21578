@@ -1,0 +1,24 @@
+
+Run script
+```
+    python run_multilabel_classifier.py \
+    --reuters_data_dir=C:\Users\vivin\Documents\Projects\fidelity\reuters21578 \
+    --task_name=reuters \ --vocab_file=C:\Users\vivin\Documents\Projects\fidelity\models\uncased_L-12_H-768_A-12\uncased_L-12_H-768_A-12\vocab.txt \ --bert_config_file=C:\Users\vivin\Documents\Projects\fidelity\models\uncased_L-12_H-768_A-12\uncased_L-12_H-768_A-12\bert_config.json \
+    --output_dir=C:\Users\vivin\Documents\Projects\fidelity\models\model_20220317
+    --do_train=False
+    --do_eval=False
+    --do_predict=False
+```
+
+EVAL result
+I0320 00:12:38.979363 139628830963584 <ipython-input-10-2fb718a642df>:152] ***** Eval results *****
+INFO:tensorflow:  eval_accuracy = 0.037902974
+I0320 00:12:38.989170 139628830963584 <ipython-input-10-2fb718a642df>:154]   eval_accuracy = 0.037902974
+INFO:tensorflow:  eval_loss = 0.0015029485
+I0320 00:12:39.004969 139628830963584 <ipython-input-10-2fb718a642df>:154]   eval_loss = 0.0015029485
+INFO:tensorflow:  global_step = 1293
+I0320 00:12:39.011782 139628830963584 <ipython-input-10-2fb718a642df>:154]   global_step = 1293
+INFO:tensorflow:  loss = 0.001502916
+I0320 00:12:39.015124 139628830963584 <ipython-input-10-2fb718a642df>:154]   loss = 0.001502916
+
+

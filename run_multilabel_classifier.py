@@ -10,8 +10,12 @@ import os
 import sys
 import tensorflow as tf
 import glob
+from glob import glob
+import re
+import numpy as np
 
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import multilabel_confusion_matrix, hamming_loss, accuracy_score 
 from collections import defaultdict
 
 import six
@@ -68,7 +72,7 @@ flags.DEFINE_string(
 #     "than this will be padded.")
 
 # flags.DEFINE_bool("do_train", False, "Whether to run training.")
-
+#
 # flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
 # flags.DEFINE_bool(
@@ -123,10 +127,10 @@ flags.DEFINE_string(
 #     "num_tpu_cores", 8,
 #     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
-# flags.DEFINE_integer(
-#     "", 100,
-#     "threshold of minimum number of samples for a reuters class"
-# )
+flags.DEFINE_integer(
+    "threshold", 100,
+    "threshold of minimum number of samples for a reuters class"
+)
 
 # flags.DEFINE_string(
 #     "task_name", "reuters",
@@ -238,7 +242,7 @@ def count_labels (y):
             label_freq[l]+=1
     return label_freq
 
-def clean (texts, labels):
+def clean (texts, labels, labels_small):
     #replace labels in labels_small to "others"
     texts_cleaned = []
     labels_cleaned = []
@@ -324,14 +328,14 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
     logits = tf.matmul(output_layer, output_weights, transpose_b=True)
     logits = tf.nn.bias_add(logits, output_bias)
-    probabilities = tf.exp(logits) #for multi-label classification
+    probabilities = tf.math.sigmoid(logits) #for multi-label classification
 #     probabilities = tf.nn.softmax(logits, axis=-1)
 #     log_probs = tf.nn.log_softmax(logits, axis=-1)
 
 #     one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
 
 #     per_example_loss = -tf.reduce_sum(labels * log_probs, axis=-1)
-    per_example_loss = -tf.reduce_sum(labels * logits, axis=-1) #can also try reduce_mean here
+    per_example_loss = -tf.reduce_sum(tf.cast(labels, dtype=tf.float32) * tf.math.log_sigmoid(logits), axis=-1) #can also try reduce_mean here
     loss = tf.reduce_mean(per_example_loss)
 
     return (loss, per_example_loss, logits, probabilities)
@@ -404,11 +408,10 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
       def metric_fn(per_example_loss, label_ids, logits, is_real_example):
         # predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
-        predictions = tf.cond(tf.math.greater(probabilities, \
-            tf.multiply(tf.ones_like(probabilities, dtype=tf.float32), 0.5)), \
-                true_fn=1, false_fn=0) #if prob for a class is larger than 0.5, then it is positive prediction for this class
+        predictions = tf.cast(probabilities > 0.5, dtype=tf.int32) #if prob for a class is larger than 0.5, then it is positive prediction for this class
         accuracy = tf.metrics.accuracy(
             labels=label_ids, predictions=predictions, weights=is_real_example)
+        
         loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
         return {
             "eval_accuracy": accuracy,
@@ -423,9 +426,10 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
           eval_metrics=eval_metrics,
           scaffold_fn=scaffold_fn)
     else:
+      predictions = tf.cast(probabilities > 0.5, dtype=tf.int32)
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
-          predictions={"probabilities": probabilities},
+          predictions={"predictions": predictions},
           scaffold_fn=scaffold_fn)
     return output_spec
 
@@ -549,7 +553,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
     tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
     tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-    tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
+    tf.logging.info("label: %s (id = %s)" % (str(example.label), str(label_id)))
 
   feature = InputFeatures(
       input_ids=input_ids,
@@ -611,7 +615,7 @@ def file_based_input_fn_builder(input_file, seq_length, label_list, is_training,
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  docs = get_reuters_documents(FLAGS.data_dir)
+  docs = get_reuters_documents(FLAGS.reuters_data_dir)
   data = [(u'{title}\n\n{body}'.format(**doc), doc['topics']) for doc in docs if doc['topics']]
   texts, labels= zip(*data)
   #this is the labels to remove
@@ -619,12 +623,10 @@ def main(_):
   labels_small = [l for l in label_freq if label_freq[l] <= FLAGS.threshold]
   labels_tokeep = [l for l in label_freq if label_freq[l] > FLAGS.threshold]
   #if a label is considered to be a small category (according to the threshold setup), replace it to "other"
-  texts_cleaned, labels_cleaned = clean (texts, labels)
+  texts_cleaned, labels_cleaned = clean (texts, labels, labels_small)
   #split train/test
   texts_train, texts_test, labels_train, labels_test = \
       train_test_split(texts_cleaned, labels_cleaned, test_size=0.3, random_state=12345)
-
-
 
   processors = {
       "reuters": ReuterProcessor,
@@ -765,51 +767,70 @@ def main(_):
         tf.logging.info("  %s = %s", key, str(result[key]))
         writer.write("%s = %s\n" % (key, str(result[key])))
 
-#   if FLAGS.do_predict:
-#     predict_examples = processor.get_test_examples(FLAGS.data_dir)
-#     num_actual_predict_examples = len(predict_examples)
-#     if FLAGS.use_tpu:
-#       # TPU requires a fixed batch size for all batches, therefore the number
-#       # of examples must be a multiple of the batch size, or else examples
-#       # will get dropped. So we pad with fake examples which are ignored
-#       # later on.
-#       while len(predict_examples) % FLAGS.predict_batch_size != 0:
-#         predict_examples.append(PaddingInputExample())
+  if FLAGS.do_predict:
+    predict_examples = processor.get_dev_examples(texts_test, labels_test)
+    num_actual_predict_examples = len(predict_examples)
+    if FLAGS.use_tpu:
+    # TPU requires a fixed batch size for all batches, therefore the number
+    # of examples must be a multiple of the batch size, or else examples
+    # will get dropped. So we pad with fake examples which are ignored
+    # later on.
+      while len(predict_examples) % FLAGS.predict_batch_size != 0:
+        predict_examples.append(PaddingInputExample())
 
-#     predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-#     file_based_convert_examples_to_features(predict_examples, label_list,
-#                                             FLAGS.max_seq_length, tokenizer,
-#                                             predict_file)
+    predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+    file_based_convert_examples_to_features(predict_examples, label_list,
+                                            FLAGS.max_seq_length, tokenizer,
+                                            predict_file)
 
-#     tf.logging.info("***** Running prediction*****")
-#     tf.logging.info("  Num examples = %d (%d actual, %d padding)",
-#                     len(predict_examples), num_actual_predict_examples,
-#                     len(predict_examples) - num_actual_predict_examples)
-#     tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+    tf.logging.info("***** Running prediction*****")
+    tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                    len(predict_examples), num_actual_predict_examples,
+                    len(predict_examples) - num_actual_predict_examples)
+    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-#     predict_drop_remainder = True if FLAGS.use_tpu else False
-#     predict_input_fn = file_based_input_fn_builder(
-#         input_file=predict_file,
-#         seq_length=FLAGS.max_seq_length,
-#         is_training=False,
-#         drop_remainder=predict_drop_remainder)
+    predict_drop_remainder = True if FLAGS.use_tpu else False
+    predict_input_fn = file_based_input_fn_builder(
+        input_file=predict_file,
+        seq_length=FLAGS.max_seq_length,
+        label_list=label_list,
+        is_training=False,
+        drop_remainder=predict_drop_remainder)
 
-#     result = estimator.predict(input_fn=predict_input_fn)
+    result = estimator.predict(input_fn=predict_input_fn)
 
-#     output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
-#     with tf.gfile.GFile(output_predict_file, "w") as writer:
-#       num_written_lines = 0
-#       tf.logging.info("***** Predict results *****")
-#       for (i, prediction) in enumerate(result):
-#         probabilities = prediction["probabilities"]
-#         if i >= num_actual_predict_examples:
-#           break
-#         output_line = "\t".join(
-#             str(class_probability)
-#             for class_probability in probabilities) + "\n"
-#         writer.write(output_line)
-#         num_written_lines += 1
-#     assert num_written_lines == num_actual_predict_examples
+    # output_predict_file = os.path.join(FLAGS.output_dir, "test_results.csv")
+    # with tf.gfile.GFile(output_predict_file, "w") as writer:
+    #   num_written_lines = 0
+    #   tf.logging.info("***** Predict results *****")
+    #   for (i, prediction) in enumerate(result):
+    #     predictions = prediction["predictions"]
+    #     if i >= num_actual_predict_examples:
+    #       break
+    #     output_line = ",".join(str(class_pred) for class_pred in predictions) + "\n"
+    #     writer.write(output_line)
+    #     num_written_lines += 1
+    # assert num_written_lines == num_actual_predict_examples
+    
+    
+    label_map = {}
+    for (i, label) in enumerate(label_list):
+      label_map[label] = i
+    # label_id = [1 if l in example.label else 0 for l in label_list]
+    labels = np.array([[1 if l in ex.label else 0 for l in label_list] for ex in predict_examples])
+    pred = np.array([prediction["predictions"] for prediction in result])
+    
+    print("---------------accuracy score----------------")
+    print(accuracy_score(labels, pred))
+    
+    print("---------------hamming loss----------------")
+    print(hamming_loss(labels, pred))
+    
+    cms = multilabel_confusion_matrix(labels, pred)
+    print("---------------confusion matrices----------------")
+    for i, cm in enumerate(cms):
+      print(label_list[i])
+      print(cm)
 
 
 
@@ -823,11 +844,15 @@ if __name__ == "__main__":
     tf.app.run()
 
     #python run_multilabel_classifier.py \
-    # --data_dir=C:\Users\vivin\Documents\Projects\fidelity\reuters21578 \
+    # --reuters_data_dir=C:\Users\vivin\Documents\Projects\fidelity\reuters21578 \
     # --task_name=reuters \
     # --vocab_file=C:\Users\vivin\Documents\Projects\fidelity\models\uncased_L-12_H-768_A-12\uncased_L-12_H-768_A-12\vocab.txt \
     # --bert_config_file=C:\Users\vivin\Documents\Projects\fidelity\models\uncased_L-12_H-768_A-12\uncased_L-12_H-768_A-12\bert_config.json \
     # --output_dir=C:\Users\vivin\Documents\Projects\fidelity\models\model_20220317
+    # --do_train=False
+    # --do_eval=False
+    # --do_predict=False
+    
 
 
 
